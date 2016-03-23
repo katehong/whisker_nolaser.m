@@ -1,0 +1,891 @@
+% for analyzing whisker tracking data. first requires user to get
+% "*.measurements" file after following tracking procedure with whiski.exe
+% program (See Clack, Janelia tutorial). provides LoadMeasurements.m,
+% LoadWhiskers.m, and SaveMeasurements.m files
+% measurements file contains these variables (in order):
+% fid (frame number), wid (whisker identity), label (?),
+% face_x, face_y (origin of whisker, doesn't change), length(px),
+% score(tracing score), angle (at follicle), curvature(1/px), follicle_x,
+% follicle_y, (should be about the same for all timepoints
+% tip_x, tip_y.
+% Note: between stim start and motor movement into position = 30 frames =
+% 120ms
+% note: if whiskers file is greater than 32 Megabytes then whiski won't
+% load the file on some PCs.
+
+clear all;
+close all;
+
+% (1) LOAD .MEASUREMENTS FILE AND EXTRACT DATA
+%load the files: pick *.measurement file output from Janelia Whiski associated code
+[filename, pathname] = uigetfile('*.measurements', 'Select whisker measurements file');
+filepath = [pathname filename]
+
+measurements = LoadMeasurements(filepath);
+% make matrices containing individual data features.
+for i = 1: size(measurements,1)
+    fID (i) = measurements(i).fid+1; %added 1 to index frame number
+    wID (i) = measurements(i).wid;
+    %wLabel(i)= measurements(i).label;
+    wAngle(i) = measurements(i).angle;
+    wLength(i) = measurements(i).length; %outputs the whisker angle at each frame i
+    wCurv(i) = measurements(i).curvature;
+end
+
+disp ('loaded measurements file...');
+%% (A) Take the wID=0 defined by CLACK analysis (not always correct).
+% open whiskers file (contains the whisker coordinates
+
+% find all the data for whisker 0 from *.measurements file ( or which ever is the primary whisker)
+primaryWhiskerIdx=find(wID == 0);
+fID_unique =  fID(primaryWhiskerIdx);
+wAngle_unique = wAngle(primaryWhiskerIdx);
+wLength_unique = wLength(primaryWhiskerIdx);
+wCurv_unique = wCurv(primaryWhiskerIdx);
+
+
+% trim data step2: plot to choose threshold for exclude outliers (wrong traces).
+% (1) all the whiskers that are less than some minimum threshold length
+% (2) any thing picked up at an extreme angle
+% ... and make a continuous array where each value is the wAngle at that frame
+
+
+% trim data step2: plot to choose threshold for exclude outliers (wrong traces).
+% (1) all the whiskers that are less than some minimum threshold length
+% (2) any thing picked up at an extreme angle
+% ... and make a continuous array where each value is the wAngle at that frame
+
+figure(1);
+subplot(2,1,1)
+title('traced whisker length')
+hold on;
+plot(wLength_unique);
+
+subplot(2,1,2)
+hold on;
+title('whisker angles')
+plot(wAngle_unique);
+disp('set threshold for what counts as a whisker: length and angle:');
+%% 2. PREPROCESSING WHISKER DATA - REMOVE OUTLIER TRACES THAT ARE TOO SHORT/LONG TO BE WHISKERS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% user defines minimum whisker length and angle (look at video and whiski)
+minWhiskerLength = 150; % check by plot(wLength_unique) and whiski video
+maxWhiskerAngle = 160;  % check by plot(wAngle_unique)
+minWhiskerAngle = 50;
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% find all indices where length is greater than min set length (find by plot
+% (wlength) and look at whisker video with whiski to get a number
+limLengthIdx = find(wLength_unique>minWhiskerLength);
+limAngleIdx = find(wAngle_unique<maxWhiskerAngle & wAngle_unique>minWhiskerAngle);
+
+% indices that satisify both criteria
+limIdx = intersect(limLengthIdx, limAngleIdx);
+% new array with just the frames with the primary whisker trace in them
+fID_prim = fID_unique(limIdx);
+wAngle_prim = wAngle_unique(limIdx);
+wLength_prim = wLength_unique(limIdx);
+wCurv_prim = wCurv_unique(limIdx);
+
+figure(2);
+subplot(2,1,1)
+title('traced whisker length')
+hold on;
+plot(wLength_prim);
+
+subplot(2,1,2)
+hold on;
+title('whisker angles')
+plot(wAngle_prim);
+
+disp('used thresholds to exclude noise... ')
+% make an empty matrix for the continuous frame array
+contAngleArr = [];
+contCurvArr = [];
+contAngleArr = NaN(1,max(fID_prim));
+contIDArr = NaN(1,max(fID_prim));
+for j = 1: length(fID_prim)
+    contAngleArr(fID_prim(j))=wAngle_prim(j);
+    contIDArr(fID_prim(j))=fID_prim(j);
+    contCurvArr(fID_prim(j))= wCurv_prim(j);
+end
+% need to convert all 0 values to nan (b/c frames with no whisker trace default
+% to whisker curvature of 0).
+contCurvArr(contCurvArr ==0)=nan;
+% contAngleArr: puts all the angles in a contiuous array as if all fID
+% values were available (some times they are not). Allows use of
+% wAngle_prim index to reference the frame number
+disp ('building contAngleArr for all angle values in each frame ....');
+%% (3) LOAD BEHAVIOR EVENT DATA FROM ARDUINO OUTPUT FILE
+%Align with arduino data. Calls Clay's "correctResp2p_opto" function and stores structure
+% into "arduinoOutput"
+
+goIdx=[];
+stimOffIdx=[];
+nogoIdx=[];
+catchOffIdx=[];
+respLatArr = [];
+% use this function if arduino file is from random fiber pos
+[arduinoOutput] = extractEvents_opto_fiberpos();
+
+numTotalTrials = length(arduinoOutput.stimTypeArr);
+% extract values from the structure into arrays (easier for me to work
+% with)
+for k = 1:numTotalTrials-5 % temp. remove "-5"
+    stimTypeArr(k) = arduinoOutput.stimTypeArr(k);
+    stimTimeArr(k) = arduinoOutput.stimTimeArr(k);
+    corrRespArr (k) = arduinoOutput.corrRespArr(k);
+    optoArr(k) = arduinoOutput.optoArr(k);
+    respLatArr(k) = arduinoOutput.respLatArr(k);
+end
+% convert 0s to nans or max time (1500-2000) in respLatArr (never responded)
+respLatArr(respLatArr==0)=1500;
+
+% note: events that occur before optostart has fiber position default 0.
+% find number of each trial type
+hit = find((stimTypeArr == 1) & (corrRespArr ==1)); % indices of hit go trials
+false_alarm = find((stimTypeArr == 0) & (corrRespArr == 0)); % indices of false alarm to catch trials
+numTrials = numel(stimTypeArr);
+
+% create an array of response latencies
+goIdx= (stimTypeArr==1) ;% new matrix with 1 for all stimTypeArr==1 and optoArr==1
+nogoIdx = (stimTypeArr==0);
+
+% for go trials - hit or miss
+hitIdx = (stimTypeArr==1)&(corrRespArr==1);
+missIdx= (stimTypeArr==1)&(corrRespArr == 0);
+
+% for nogo trials - false alarm(FA) or correct reject (CJ)
+FAIdx = (stimTypeArr==0)&(corrRespArr==0);
+CRIdx = (stimTypeArr==0)&(corrRespArr==1);
+
+
+%% (4) ALIGN ARDUINO TIME (MS) WITH FRAMES FROM HIGHSPEED IMAGING.
+% convert the frame values into arduino time (ms)
+% frame number is the index of the continuousAngleArray (also
+% zeroredAngleArr)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% slope of the line of best fit for the arduino time vs. frame rate
+% obtained by manually scoring when the stimulus moves and matching it
+% up with arduino output. Plot the line and extrapolate the frame number
+slope = 0.250;
+offset = -1830.4;
+prebuffer = 1000; % #frames, (1s ~ 250) how much to plot before and after stimulus onset
+postbuffer = 1000;
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%frameIdx = [1:length(contAngleArr)];
+%frameToTime = (frameIdx-offset)/slope;
+% convert stimTimeArr into frames
+stimFrameArr = [];
+stimFrameArr = round((stimTimeArr*slope)+offset);
+% match the lengths of arudino time and video time (take the less of the
+% two)
+timeLimit = min(length(contAngleArr),max(stimFrameArr));
+% new wAngle_prim wihtin the limited time frame
+contAngleArr = contAngleArr(1:timeLimit);
+contCurvArr = contCurvArr(1:timeLimit);
+% new stimFrameArr (start frames for each trial) with limited length
+stimFrameArr=stimFrameArr(stimFrameArr < timeLimit);
+numTrials = length(stimFrameArr);
+disp('Converted arduino times to video frames...');
+% (5) CONSTRUCT ANGLES AND CURVATURE ARRAYS FOR EACH TRIAL
+%create trial angles array with all of the frames within the time window
+disp('building angle matrix of all trial time windows ...');
+
+startTrial = 6; % in case front end doesn't match skip trials in the beginning to match available video
+cutoffTrial = numTrials-1; % default: drop the last trial
+trial_angles = nan(numTrials,(prebuffer+postbuffer)+1);
+respFrame = [];
+for q = startTrial:cutoffTrial % in some cases, cut the last trial in case where arduino program ended before completing trial
+    trial_angles (q,:) = contAngleArr(stimFrameArr(q)-prebuffer: stimFrameArr(q)+postbuffer); % 1 sec before and ~4 sec after stim frame (250fps assumed)
+    trial_curv (q,:) = contCurvArr(stimFrameArr(q)-prebuffer: stimFrameArr(q)+postbuffer);
+    respFrame(q) = round(respLatArr(q)*250/1000); % response time in frame numbers (doesn't really need to be in a loop)
+end
+%
+
+%convert all the 0 values in curvature to NaN.
+%trial_curv(trial_curv==0) = nan;
+% plot the averages for all trials
+figure(4);
+subplot(2,1,1);
+hold on;
+plot(nanmean(trial_angles));
+ylimits =ylim;
+xlim([0 2000]);
+title('mean angle');
+% red line to mark the start of motor movement
+line([prebuffer, prebuffer],[ylimits(1) ylimits(2)],'Color','r');
+subplot(2,1,2);
+hold on;
+title('mean curvature')
+plot(nanmean(trial_curv));
+ylimits =ylim;
+xlim([0 2000]);
+line([prebuffer, prebuffer],[ylimits(1) ylimits(2)],'Color','r');
+
+
+
+%% plot the absolute whisker angles for each condition
+figure(5);
+
+hold on;
+plotxlimit = [-2 2];
+
+%construct array of all the angles for each trial
+goAngles = trial_angles(goIdx(1:cutoffTrial),:);
+noGoAngles = trial_angles(nogoIdx(1:cutoffTrial),:);
+
+%find number of trials for each condition
+numGoTrials = size(goAngles, 1);
+numNogoTrials = size(noGoAngles,1);
+
+%SEM for each condition:
+semGo = nanstd(goAngles)/sqrt(numGoTrials);
+semNoGo = nanstd(noGoAngles)/sqrt(numNogoTrials);
+
+%create array of all curvature values for each trial type
+goCurv = trial_curv(goIdx(1:(cutoffTrial)),:);
+noGoCurv = trial_curv(nogoIdx(1:cutoffTrial),:);
+
+% SEM of curvatures
+semGoCurv = nanstd(goCurv)/sqrt(numGoTrials);
+semNoGoCurv = nanstd(noGoCurv)/sqrt(numNogoTrials);
+%
+% define x axis values for plotting
+xvalues = [1:length(goAngles)];
+xvalues = (xvalues/250)-prebuffer/250;
+
+% find the max/min avg angles to set uniform ylim for graphs (use
+% Position 1 as default limits)
+ymaxAngle = max(nanmean(goAngles)+3);
+yminAngle= min(nanmean(goAngles)-3);
+
+ymaxCurv = max(nanmean(goCurv))+2E-4;
+yminCurv= min(nanmean(goCurv))-1E-4;
+
+% PLOT OF GO TRIALS, LASER ON/OFF
+figure(5);
+%str = sprintf('fiber position # %u',i);
+str = 'whisker angle';
+subplot(211);
+hold on;
+ylabel('whisker angle (deg)');
+h1 = shadedErrorBar(xvalues, nanmean(goAngles),semGo,'k', 'transparent');
+h2 = shadedErrorBar(xvalues, nanmean(noGoAngles),semNoGo,'g', 'transparent');
+title(str);
+xlabel('time(s)');
+%text(1, ymaxAngle-3, 'Go');
+xlim(plotxlimit);
+ylim([yminAngle ymaxAngle]);
+line([0 0],[yminAngle ymaxAngle],'Color','k', 'LineStyle', '--');
+legend([h1.mainLine, h2.mainLine],  'go','nogo', 'Location', 'NorthWest')
+
+
+subplot(212);
+hold on;
+ylabel('curvature (K)');
+h3 = shadedErrorBar(xvalues , nanmean(goCurv),semGoCurv ,'k', 'transparent');
+h4 = shadedErrorBar(xvalues , nanmean(noGoCurv),semNoGoCurv ,'g', 'transparent');
+xlabel('time(s)');
+title('whisker curvature');
+xlim(plotxlimit);
+ylim([yminCurv ymaxCurv]);
+line([0 0],[yminCurv ymaxCurv],'Color','k', 'LineStyle', '--');
+%legend([h3.mainLine, h4.mainLine],  'go','nogo', 'Location', 'NorthWest')
+
+
+%% find the moving variance of whisker angles for each trial type (hit or miss)
+binSize = 25;
+
+rStim = 0;
+cStim= 0;
+rCatch= 0;
+cCatch= 0;
+numGoTrials = 0;
+numNogoTrials= 0;
+trialLength= prebuffer+postbuffer+1;
+varTrialLength = trialLength-binSize;
+varGo = nans(size(goAngles,1), max((1+binSize): varTrialLength));
+varNoGo =nans(size(noGoAngles,1), max((1+binSize): varTrialLength));
+
+figure(7);
+
+numGoTrials = size(goAngles, 1);
+numNogoTrials= size(noGoAngles,1);
+
+for m = 1: numGoTrials
+    for n = (1+binSize): varTrialLength
+        varGo(m,n) = nanvar(goAngles(m,(n-binSize: n+binSize)));
+    end
+end
+
+for m = 1:numNogoTrials
+    for n = (1+binSize):varTrialLength
+        varNoGo(m,n) = nanvar(noGoAngles (m,(n-binSize: n+binSize)));
+    end
+end
+
+
+%   calculate the sem for each time point
+semGo  = nanstd(varGo)/sqrt(numGoTrials);
+semNoGo  = nanstd(varNoGo)/sqrt(numNogoTrials);
+
+%   x2values are constant for all conditions. Choose first position data to
+%   define x2Values.
+x2values = 1: varTrialLength;
+x2values = (x2values/250)-prebuffer/250;
+
+hold on;
+ylabel('variance');
+shadedErrorBar(x2values, nanmean(varGo), semGo,'k', 'transparent');
+shadedErrorBar(x2values, nanmean(varNoGo),semNoGo,'g', 'transparent');
+title('Go trials');
+xlim([-4 4]);
+line([0 0],[0 100],'Color','k');
+
+%% split trials for correct and incorrect trials for whisker angle:
+goHitRows = [];
+goHitCols = [];
+
+figure(9);
+hold on;
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% designate here the x-axis time frame to plot
+plotTimeFrame = [-0.5 1];
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%construct angle arrays for each  trial type
+hitAngles = trial_angles(hitIdx(1:(cutoffTrial)),:);
+missAngles = trial_angles(missIdx(1:(cutoffTrial)),:);
+
+FAAngles  = trial_angles(FAIdx (1:(cutoffTrial)),:);
+CRAngles  = trial_angles(CRIdx (1:(cutoffTrial)),:);
+
+% trials number may actually not be equal - probably need to fix this
+% at some point...
+hitTrialNum = size(hitAngles,1);
+missTrialNum = size(missAngles,1);
+
+FATrialNum = size(FAAngles,1);
+CRTrialNum = size(CRAngles,1);
+
+semGoHit  = nanstd(hitAngles )/sqrt(hitTrialNum );
+semGoMiss  = nanstd(missAngles )/sqrt(missTrialNum );
+%
+semFA  = nanstd(FAAngles )/sqrt(FATrialNum );
+semCR  = nanstd(CRAngles )/sqrt(CRTrialNum );
+
+xvalues  = 1:length(hitAngles);
+xvalues  = (xvalues/250)-prebuffer/250;
+
+% find the max/min avg angles to set uniform ylim for graphs (use
+% Position 1 as default limits)
+ymax = max(nanmean(hitAngles)+10);
+ymin= min(nanmean(hitAngles)-2);
+
+
+% HIT TRIAL PLOT - LASER ON VS OFF.
+str = sprintf(['go trials; hit:miss= ' num2str(hitTrialNum) ':' num2str(missTrialNum)]);
+subplot(211);
+hold on;
+ylabel('whisker angle (deg)');
+h1 = shadedErrorBar(xvalues , nanmean(hitAngles ),semGoHit ,'g', 'transparent');
+h2 = shadedErrorBar(xvalues , nanmean(missAngles ),semGoMiss ,'k', 'transparent');
+title(str);
+xlabel('time(s)');
+text(-3.5, ymax-5, 'go');
+xlim(plotTimeFrame);
+ylim([ymin ymax]);
+line([0 0],[ymin ymax],'Color','k');
+legend([h1.mainLine, h2.mainLine],  'hit','miss', 'Location', 'NorthWest')
+
+% plot for Nogo trials. Correct reject and false alarm
+str = sprintf(['nogo trials; CR:FA = ' num2str(CRTrialNum) ':' num2str(FATrialNum)]);
+subplot(212);
+hold on;
+ylabel('whisker angle (deg)');
+h3=shadedErrorBar(xvalues , nanmean(CRAngles ),semCR ,'b', 'transparent');
+h4=shadedErrorBar(xvalues , nanmean(FAAngles ),semFA ,'r', 'transparent');
+title(str);
+xlabel('time(s)');
+text(-3.5, ymax-5, 'nogo');
+xlim(plotTimeFrame);
+ylim([ymin ymax]);
+line([0 0],[ymin ymax],'Color','k');
+legend([h3.mainLine, h4.mainLine],  'correct reject','false alarm', 'Location', 'NorthWest')
+
+
+
+%% moving variance of angles for hit vs miss trials
+figure;
+
+for m = 1: hitTrialNum
+    for n = (1+binSize): varTrialLength
+        varHit(m,n) = nanvar(hitAngles(m,(n-binSize: n+binSize)));
+    end
+end
+
+for m = 1:missTrialNum
+    for n = (1+binSize):varTrialLength
+        varMiss(m,n) = nanvar(missAngles(m,(n-binSize: n+binSize)));
+    end
+end
+
+%   calculate the sem for each time point
+semHit = nanstd(varHit)/sqrt(hitTrialNum);
+semMiss = nanstd(varMiss)/sqrt(missTrialNum);
+
+%   x2values are constant for all conditions. Choose first position data to
+%   define x2Values.
+%x2values = [1:varGoCols];
+x2values = 1: varTrialLength;
+x2values = (x2values/250)-prebuffer/250;
+
+hold on;
+ylabel('variance');
+h1=shadedErrorBar(x2values, nanmean(varHit), semHit,'k', 'transparent');
+h2=shadedErrorBar(x2values, nanmean(varMiss),semMiss,'g', 'transparent');
+title('variance 25ms sliding window');
+%ylim([0 75]);
+xlim([-2 2]);
+line([0 0],[0 160],'Color','k');
+legend([h1.mainLine, h2.mainLine], 'go','nogo', 'Location', 'NorthEast');
+%% Exact same but split trials for correct and incorrect trials: for curvature
+
+figure;
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% designate here the x-axis time frame to plot
+plotTimeFrame = [-0.5 1];
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%construct curvature arrays for each  trial type
+hitCurv = trial_curv(hitIdx(1:(cutoffTrial)),:);
+missCurv = trial_curv(missIdx(1:(cutoffTrial)),:);
+
+FACurv = trial_curv(FAIdx(1:(cutoffTrial)),:);
+CRCurv = trial_curv(CRIdx(1:(cutoffTrial)),:);
+
+% number of each type of trial
+
+semGoHitCurv = nanstd(hitCurv)/sqrt(hitTrialNum);
+semGoMissCurv = nanstd(missCurv)/sqrt(missTrialNum);
+
+semFACurv = nanstd(FACurv)/sqrt(FATrialNum);
+semCRCurv = nanstd(CRCurv)/sqrt(CRTrialNum);
+
+xvalues = 1:length(hitCurv);
+xvalues = (xvalues/250)-prebuffer/250;
+
+% find the max/min avg angles to set uniform ylim for graphs (use
+% Position 1 as default limits)
+ymax = max(nanmean(hitCurv)+ 2*10^-4);
+ymin= min(nanmean(hitCurv) -2*10^-4);
+
+% HIT TRIAL PLOT - LASER ON VS OFF.
+str = sprintf(['go trials; hit:miss= ' num2str(hitTrialNum) ':' num2str(missTrialNum)]);
+ax1=subplot(211);
+hold on;
+ylabel('whisker curvature (K)');
+h1 = shadedErrorBar(xvalues, nanmean(hitCurv),semGoHitCurv,'k', 'transparent');
+h2 = shadedErrorBar(xvalues, nanmean(missCurv),semGoMissCurv,'g', 'transparent');
+title(str);
+xlabel('time(s)');
+text(-3.5, ymax-5, 'Go');
+xlim(plotTimeFrame);
+ylim([ymin ymax]);
+line([0 0],[ymin ymax],'Color','k');
+legend([h1.mainLine, h2.mainLine],  'hit','miss', 'Location', 'NorthWest')
+
+
+% plot for Nogo trials. Correct reject and false alarm
+str = sprintf(['nogo trials; correct reject: false alarm= ' num2str(CRTrialNum) ':' num2str(FATrialNum)]);
+ax3=subplot(212);
+hold on;
+ylabel('whisker curvature (K)');
+shadedErrorBar(xvalues, nanmean(CRCurv),semCRCurv,'b', 'transparent');
+shadedErrorBar(xvalues, nanmean(FACurv),semFACurv,'r', 'transparent');
+title(str);
+xlabel('time(s)');
+text(-3.5, ymax-5, 'Go');
+xlim(plotTimeFrame);
+ylim([ymin ymax]);
+line([0 0],[ymin ymax],'Color','k');
+
+%linkaxes([ax1,ax2,ax3,ax4],'xy')
+
+
+%% %% VIDEO ANALYSIS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% DEFINE THRESHOLD FOR CURVATURE AND ANGLES
+%% FOR VIDEO ANALYSIS
+%load the video file to reference
+[videofilename, videopathname] = uigetfile('*.mp4', 'Select corresponding video file');
+videopath = [videopathname, videofilename];
+
+% extract parameters from the video file:
+vidobj = VideoReader(videopath);
+%extrac the number of frames in the video
+nFrames = vidobj.NumberOfFrames;
+vidHeight = vidobj.Height;
+vidWidth = vidobj.Width;
+%preallocate the movie structure.
+mov(nFrames) = struct('cdata',zeros(vidHeight,vidWidth,3,'uint8'),...
+    'colormap',[]);
+disp('Loaded mp4 file ...');
+%%
+% screen through video and traces without saving video:
+%
+% AND plot the whisker on top of the video. plot the equivalent whisker
+% angle below. Good for confirming alignment.
+% saveFileName = inputdlg('save file name as:');
+
+
+trialNum =100;
+vStartFrame = stimFrameArr(trialNum); % takes ~120ms for stim to reach whisker field
+vEndFrame = vStartFrame+375;
+%trialrange = (vStartFrame):vEndFrame;
+
+ymaxAngle = max(nanmean(goAngles)+2);
+yminAngle= min(nanmean(goAngles)-2);
+ymaxCurv = max(nanmean(goCurv));
+yminCurv= min(nanmean(goCurv));
+frameperiod = vStartFrame:vEndFrame; % video frame period to animaate
+xtime = (frameperiod-vStartFrame)./slope; % convert frame number to ms
+
+respFrame2 = stimFrameArr(trialNum)+respFrame(trialNum); % response time in #frames post stim
+relativeRespFrame = (respFrame2-vStartFrame)/slope;
+
+for k = frameperiod
+    
+    figH = figure(9);
+    hold on;
+    % Create textbox
+    str = {'trial#:' num2str(trialNum), 'laser:', num2str(optoArr(trialNum)), ...
+        'angle:', num2str(contAngleArr(k)),...
+        'curvature:', num2str(contCurvArr(k))};
+    textbox = uicontrol('Style', 'text',...
+        'String', str,... %replace something with the text you want
+        'Units','normalized',...
+        'Position',[0.02 0.5 0.2 0.3]);
+    
+    linek = (k-vStartFrame)/slope;
+    
+    
+    % for all the frames in the video
+    s1 = subplot(11,1,1:7);
+    mov(k).cdata = read(vidobj,k);
+    fID_k = fID_unique(fID_unique==k);
+    
+    image(mov(k).cdata);
+    axis equal;
+    axis off;
+    
+    s2 = subplot(11,1,8:9);
+    hold on;
+    %title('whisker angle');
+    plot(xtime, contAngleArr (frameperiod),'Color','k');
+    angleLim = get(gca,'ylim');
+    %ylim=([yminAngle ymaxAngle]);
+    timeline = line([linek,linek],[angleLim],'Color','r');
+    respLine = line([relativeRespFrame, relativeRespFrame],[angleLim],'Color','g');
+    pause(1/10000)
+    set(s2,'xticklabel',[]);
+    ylabel('Angle')
+    
+    s3 = subplot(11,1,10:11);
+    hold on;
+    plot (xtime, contCurvArr(frameperiod),'Color','k');
+    xlabel('time (ms)');
+    ylabel('Curvature (K)');
+    %ylim = ([yminCurv ymaxCurv]);
+    curvlim = get(gca, 'ylim');
+    movingLine = line ([linek,linek],[curvlim],'Color','r');
+    respLine = line([relativeRespFrame, relativeRespFrame],[curvlim],'Color','g');
+    pause(1/10000);
+    
+    meancurv = nanmean(contCurvArr(frameperiod));
+    line([min(xtime), max(xtime)], [meancurv, meancurv],'Color','k');
+    % delete the lines
+    delete(timeline);
+    delete(movingLine);
+    delete(textbox);
+    
+end
+%%
+
+nogoMeanCurv = nanmean(nanmean((CRCurv))); %mean curvature for nogo
+nogoMinCurv = nanmin(nanmin((CRCurv))); %min curvature for nogo
+nogoMaxCurv = nanmax(nanmax((CRCurv))); % max curvature for nogo
+nogoModeCurv = mode(mode((CRCurv))); % mode value for no go
+nogoSTDCurv = nanstd(nanstd((CRCurv))); % std of nogo curvature
+figure
+hold on;
+plot (xtime, contCurvArr(frameperiod),'Color','k');
+respLine = line([relativeRespFrame, relativeRespFrame],[curvlim],'Color','g');
+meancurv = nanmean(contCurvArr(frameperiod));
+stdcurv = nanstd(contCurvArr(frameperiod));
+h1 = line([min(xtime), max(xtime)], [nogoMeanCurv, nogoMeanCurv],'Color','k');
+h2 = line([min(xtime), max(xtime)], [meancurv, meancurv],'Color','b');
+h3 = line([min(xtime), max(xtime)], [nogoSTDCurv+nogoMeanCurv, nogoMeanCurv+nogoSTDCurv],'Color','r');
+legend([h1, h2, h3],  'nogo mean curvature', 'mean curvature', 'nogomean+std');
+
+%% save the file as .avi to examine more closely
+
+% prepare new file to make video
+writerObj = VideoWriter(['offHit_Trial_' num2str(trialNum) '.avi']);
+open(writerObj);
+
+
+for k = frameperiod
+    
+    figH = figure(9);
+    hold on;
+    % Create textbox
+    str = {'trial#:', num2str(trialNum), 'laser:', num2str(optoArr(trialNum)), ...
+        'angle:', num2str(contAngleArr(k)),'curvature:', num2str(contCurvArr(k))};
+    textbox = uicontrol('Style', 'text',...
+        'String', str,... %replace something with the text you want
+        'Units','normalized',...
+        'Position',[0.02 0.7 0.2 0.3]);
+    
+    linek = (k-vStartFrame)/slope
+    
+    
+    % for all the frames in the video
+    s1 = subplot(11,1,1:7);
+    mov(k).cdata = read(vidobj,k);
+    fID_k = fID_unique(fID_unique==k);
+    
+    image(mov(k).cdata);
+    axis equal;
+    axis off;
+    
+    s2 = subplot(11,1,8:9);
+    hold on;
+    %title('whisker angle');
+    plot(xtime, contAngleArr (frameperiod),'Color','k');
+    angleLim = get(gca,'ylim');
+    %ylim=([yminAngle ymaxAngle]);
+    timeline = line([linek,linek],[angleLim],'Color','r');
+    respLine = line([relativeRespFrame, relativeRespFrame],[angleLim],'Color','g');
+    pause(1/10000)
+    set(s2,'xticklabel',[]);
+    ylabel('Angle')
+    
+    s3 = subplot(11,1,10:11);
+    hold on;
+    plot (xtime, contCurvArr(frameperiod),'Color','k');
+    xlabel('time (ms)');
+    ylabel('Curvature (K)');
+    %ylim = ([yminCurv ymaxCurv]);
+    curvlim = get(gca, 'ylim');
+    movingLine = line ([linek,linek],[curvlim],'Color','r');
+    respLine = line([relativeRespFrame, relativeRespFrame],[curvlim],'Color','g');
+    
+    pause(1/250);
+    
+    frame = getframe(figH);
+    writeVideo(writerObj,frame);
+    close (figH);
+end
+close(writerObj);
+
+
+%% find the number of contacts
+
+% nogoMinCurv: minimum curvature for all nogo trials from above
+% meancurv
+minCurv_noContact =  nogoMinCurv;
+maxCurv_noContact =   meancurv ;
+minTouchAngle= 98.7;
+maxTouchAngle = 120;
+% contatcts have to be greater than max and smaller than min curvature
+% between designated angles
+
+angleTrace = contAngleArr (frameperiod); % in frame number
+curvTrace = contCurvArr(frameperiod);
+figure;
+subplot (311);
+hold on;
+
+% plot available contact times (from stimulus in position to reaction time)
+plot (xtime,contAngleArr(frameperiod) ,'Color','k'); % frameperiod: stimulus movement + 150 frames
+ylabel('angle');
+% xtime = (frameperiod-vStartFrame)./slope; % convert frame number to ms
+%plot(contTrialRange, minTouchAngle, 'r');
+[localMax,x_max,localMin,x_min] = extrema(contAngleArr(frameperiod));
+%localMaxAngleFrames = (location+cStartFrame)
+scatter(xtime(x_max),localMax,'g'); % all the local maxima
+scatter(xtime(x_min), localMin,'r');
+line([0 max(xtime)], [maxTouchAngle maxTouchAngle],'Color','k', 'LineStyle', '--');
+line([0 max(xtime)], [minTouchAngle minTouchAngle],'Color','r', 'LineStyle', '--');
+
+subplot(312);
+hold on;
+plot(xtime,contCurvArr(frameperiod) ,'Color','k')
+[clocalMax,cx_max,clocalMin,cx_min] = extrema(contCurvArr(frameperiod));
+%peakCurvX = vStartFrame+locationCurv; %frame number of all local max
+scatter(xtime(cx_max),clocalMax,'g'); % all the local maxima
+scatter(xtime(cx_min), clocalMin,'r');
+line([0 max(xtime)], [minCurv_noContact minCurv_noContact],'Color','k', 'LineStyle', '--');
+line([0 max(xtime)], [maxCurv_noContact maxCurv_noContact],'Color','r', 'LineStyle', '--');
+ylabel('curvature');
+
+% contacts are when angle is within the touch field and contacts are above or below the defined areas
+%new range to analyze for contacts. Only when stim is present and before response
+relativeRespFrame = (respFrame2-vStartFrame)/slope;
+% cut out first frames when pole isn't in position yet
+cStartFrame = stimFrameArr(trialNum)+30; % 25-40 frames after stim start (~120ms for pole to come into place)
+cEndFrame = cStartFrame+relativeRespFrame; %set as the response frame
+touchTrialRange = cStartFrame:cEndFrame; % contact possible time in raw frame angle
+% limited angle range
+% find local maxima curvature above threshold
+maxCurvTouchIdx = find(clocalMax > maxCurv_noContact);
+minCurvTouchIdx = find(clocalMin < minCurv_noContact);
+totalContactNum = length(maxCurvTouchIdx) % + length(minCurvTouchIdx) --> if whisker hits from the front
+subplot(313)
+hold on;
+plot(xtime,contCurvArr(frameperiod) ,'Color','k')
+%peakCurvX = vStartFrame+locationCurv; %frame number of all local max
+scatter(xtime(cx_max(maxCurvTouchIdx)),clocalMax(maxCurvTouchIdx),'g'); % all the local maxima
+% [clocalMax,cx_max,clocalMin,cx_min] = extrema(contCurvArr(frameperiod));
+% scatter(xtime(cx_max),clocalMax,'g'); % all the local maxima
+line([0 max(xtime)], [minCurv_noContact minCurv_noContact],'Color','k', 'LineStyle', '--');
+line([0 max(xtime)], [maxCurv_noContact maxCurv_noContact],'Color','r', 'LineStyle', '--');
+ylabel('curvature');
+%% now find contacts for all trials
+
+% minCurv_noContact =  -0.0015;
+% maxCurv_noContact = -4.9532e-04;
+cStartFrame = [];
+relativeRespFrame = [];
+cEndFrame = [];
+touchTrialRange = [];
+clocalMax=[];
+clocalMin = [];
+totalContactNum = [];
+maxCurvTouchArr = [];
+maxCurv=[];
+for ii = 1:cutoffTrial % in some cases, cut the last trial in case where arduino program ended before completing trial
+    cStartFrame = stimFrameArr(ii)+30;
+    cEndFrame = stimFrameArr(ii)+respFrame(ii);
+    touchTrialRange = cStartFrame:cEndFrame;
+    [clocalMax,cx_max,clocalMin,cx_min] = extrema(contCurvArr(touchTrialRange));
+    maxCurvTouchIdx = find(clocalMax > maxCurv_noContact);
+    minCurvTouchIdx = find(clocalMin < minCurv_noContact);
+    maxCurvTouchArr = clocalMax(maxCurvTouchIdx); % the curvature at max for each hit
+    %minCurvTouchArr = contCurvArr(minCurvTouchIdx);
+    % construct array of the maximum curvature angle of each of the touches
+    if isempty(max(maxCurvTouchArr))
+        maxCurv(ii) = nan;
+    else
+        maxCurv(ii) = max(maxCurvTouchArr);
+    end
+    totalContactNum(ii) = length(maxCurvTouchIdx) + length(minCurvTouchIdx);
+end
+%%
+hitContacts = totalContactNum(hitIdx(1:cutoffTrial));
+missContacts = totalContactNum(missIdx(1:cutoffTrial));
+
+
+hitMaxCurv = maxCurv(hitIdx(1:cutoffTrial));
+missMaxCurv = maxCurv(missIdx(1:cutoffTrial));
+
+% average of the maximum curvature values for all trials
+maxHitCurvMean = nanmean(hitMaxCurv);
+maxMissCurvMean = nanmean(missMaxCurv);
+
+% sem of these
+semHitCurvMean = nanstd(hitMaxCurv)/sqrt(length(hitMaxCurv));
+semMissCurvMean =nanstd(missMaxCurv)/sqrt(length(missMaxCurv));
+
+% plot histograms for each trial type
+figure;
+hold on;
+s1=subplot(211)
+hist(hitContacts)
+title('hit')
+
+s2=subplot(212)
+hist(missContacts)
+title('miss')
+
+linkaxes([s1 s2],'xy')
+
+%% second figure: plot maximum curvature hit for each trial type:
+figure;
+
+maxCurvMeans = [maxHitCurvMean maxMissCurvMean];
+errorCurvMeans = [semHitCurvMean semMissCurvMean];
+x = [1 2];
+bar(maxCurvMeans, 0.6)
+hold on;
+% b2 = bar(2, maxMissCurvMean, 'r')
+% set(maxCurvBar(1),'FaceColor',[0 0 0],'DisplayName','laser off');
+% set(maxCurvBar(2),'FaceColor',[0.847058832645416 0.160784319043159 0],...
+%     'DisplayName','laser on');
+set(gca, 'XTicklabel',{'Hit' 'Miss'});
+
+ylabel('max curvature (K)');
+errorbar(maxCurvMeans, errorCurvMeans, 'k', 'linestyle', 'none');
+
+%%
+figure;
+
+h = ecdf(hitContacts);
+
+hold on;
+plot(h, 'k')
+
+
+% [sig,pvalue,ks2stat] = kstest2(onHitContacts,offHitContacts)
+% string= {'P =', num2str(pvalue)}
+%text(1, 0.8, string)
+xlabel ('# contacts');
+ylabel('cumulative probability');
+
+%%
+% analyze only trials in which pole was present (hits and miss)
+hitsArr = [hitContacts' ones(length(hitContacts),1) zeros(length(hitContacts),1)];
+missArr = [missContacts' zeros(length(missContacts),1) zeros(length(missContacts),1)];
+
+% recombine everyone
+contRespArr = [hitsArr; missArr];
+
+numContArr = contRespArr(:,1);
+respCategoryArr = contRespArr(:,2);
+laserCategoryArr = contRespArr(:,3);
+maxContactNum = max(numContArr);
+
+%find idex of elements that are off trials
+
+for ii = 1: maxContactNum+1 % not allowed to start from 0
+    contNumIdx = intersect(find(laserCategoryArr==0),find(numContArr==ii-1)); % off trials with ii-1 contacts
+    RespArr = respCategoryArr(contNumIdx);
+    nContEvents(ii)=length(contNumIdx);
+    PrResp (ii) = sum(RespArr);
+    
+end
+
+existContactEventsIdx = find(nContEvents)
+touchN = existContactEventsIdx-1 % # contacts (xaxis)
+existOffContactEvents= nContEvents(existContactEventsIdx); % n, number of trials
+respY=PrResp(existContactEventsIdx); % # correct hit responses, y axis
+
+% PLOT FIGURE: PROBABILITY OF HIT GIVEN X CONTACTS
+
+n2=existOffContactEvents'
+y2 = respY'
+x2 = touchN'
+b2=glmfit(x2, [y2 n2],'binomial','link','probit');
+yfit2 = glmval(b2,x2,'probit','size',n2);
+figure;
+plot(x2, y2./n2, 'o', touchN, yfit2./n2,'-', 'LineWidth',2, 'Color','k')
+hold on;
+
+
+
+xlabel('#contacts before lever response')
+ylabel('P hit')
+%legend('laser on','off','laser off', 'off')
+
+
